@@ -187,7 +187,9 @@ def login_oauth_interactive(
                 try:
                     code = await asyncio.wait_for(code_future, timeout=120)
                 except asyncio.TimeoutError:
-                    pass
+                    server.shutdown()
+                    server.server_close()
+                    server = None
 
             if not code:
                 prompt = "Please paste the callback URL or authorization code:"
