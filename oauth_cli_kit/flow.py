@@ -196,7 +196,7 @@ def login_oauth_interactive(
 
         code: str | None = None
         try:
-            if server:
+            if server and should_open_browser:
                 print_fn("[dim]Waiting for browser callback...[/dim]")
                 try:
                     code = await asyncio.wait_for(code_future, timeout=120)
@@ -204,9 +204,17 @@ def login_oauth_interactive(
                     server.shutdown()
                     server.server_close()
                     server = None
+            elif server:
+                server.shutdown()
+                server.server_close()
+                server = None
 
             if not code:
-                prompt = "Please paste the callback URL or authorization code:"
+                prompt = (
+                    "Please open the URL above in a browser, then paste the full redirect URL:"
+                    if not should_open_browser
+                    else "Please paste the callback URL or authorization code:"
+                )
                 raw = await loop.run_in_executor(None, prompt_fn, prompt)
                 parsed_code, parsed_state = _parse_authorization_input(raw)
                 if parsed_state and parsed_state != state:

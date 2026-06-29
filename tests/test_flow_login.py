@@ -115,10 +115,11 @@ def test_login_skips_browser_auto_open_on_headless_linux(tmp_path, monkeypatch) 
     )
     storage = FileTokenStorage(token_filename=provider.token_filename, data_dir=tmp_path, import_codex_cli=False)
     opened: list[str] = []
+    server = _FakeServer()
+    prompts: list[tuple[str, int, int]] = []
 
     def start_server(state, on_code=None):
-        on_code("callback-code")
-        return _FakeServer(), None
+        return server, None
 
     def exchange(code, verifier, provider, proxy=None):
         async def run():
@@ -130,6 +131,10 @@ def test_login_skips_browser_auto_open_on_headless_linux(tmp_path, monkeypatch) 
     monkeypatch.setattr("oauth_cli_kit.flow._create_state", lambda: "state")
     monkeypatch.setattr("oauth_cli_kit.flow._start_local_server", start_server)
     monkeypatch.setattr("oauth_cli_kit.flow._exchange_code_for_token_async", exchange)
+    monkeypatch.setattr(
+        "oauth_cli_kit.flow.asyncio.wait_for",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("callback wait should not run")),
+    )
     monkeypatch.setattr("oauth_cli_kit.flow.sys.platform", "linux")
     monkeypatch.delenv("DISPLAY", raising=False)
     monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
@@ -137,13 +142,17 @@ def test_login_skips_browser_auto_open_on_headless_linux(tmp_path, monkeypatch) 
 
     token = login_oauth_interactive(
         print_fn=lambda msg: None,
-        prompt_fn=lambda prompt: (_ for _ in ()).throw(AssertionError("manual prompt should not run")),
+        prompt_fn=lambda prompt: prompts.append((prompt, server.shutdowns, server.closes))
+        or "http://localhost:1455/auth/callback?code=manual-code&state=state",
         provider=provider,
         storage=storage,
     )
 
-    assert token.access == "callback-code"
+    assert token.access == "manual-code"
     assert opened == []
+    assert len(prompts) == 1
+    assert "full redirect URL" in prompts[0][0]
+    assert prompts[0][1:] == (1, 1)
 
 
 def test_login_open_browser_override_forces_browser_open(tmp_path, monkeypatch) -> None:
