@@ -102,3 +102,87 @@ def test_login_timeout_closes_callback_server_before_manual_prompt(tmp_path, mon
     assert prompt_seen_closed == [(1, 1)]
     assert server.shutdowns == 1
     assert server.closes == 1
+
+
+def test_login_skips_browser_auto_open_on_headless_linux(tmp_path, monkeypatch) -> None:
+    provider = OAuthProviderConfig(
+        client_id="client",
+        authorize_url="https://example/auth",
+        token_url="https://example/token",
+        redirect_uri="http://localhost:1455/auth/callback",
+        scope="openid",
+        token_filename="t.json",
+    )
+    storage = FileTokenStorage(token_filename=provider.token_filename, data_dir=tmp_path, import_codex_cli=False)
+    opened: list[str] = []
+
+    def start_server(state, on_code=None):
+        on_code("callback-code")
+        return _FakeServer(), None
+
+    def exchange(code, verifier, provider, proxy=None):
+        async def run():
+            return OAuthToken(access=code, refresh="refresh", expires=123)
+
+        return run
+
+    monkeypatch.setattr("oauth_cli_kit.flow._generate_pkce", lambda: ("verifier", "challenge"))
+    monkeypatch.setattr("oauth_cli_kit.flow._create_state", lambda: "state")
+    monkeypatch.setattr("oauth_cli_kit.flow._start_local_server", start_server)
+    monkeypatch.setattr("oauth_cli_kit.flow._exchange_code_for_token_async", exchange)
+    monkeypatch.setattr("oauth_cli_kit.flow.sys.platform", "linux")
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    monkeypatch.setattr("oauth_cli_kit.flow.webbrowser.open", lambda url: opened.append(url))
+
+    token = login_oauth_interactive(
+        print_fn=lambda msg: None,
+        prompt_fn=lambda prompt: (_ for _ in ()).throw(AssertionError("manual prompt should not run")),
+        provider=provider,
+        storage=storage,
+    )
+
+    assert token.access == "callback-code"
+    assert opened == []
+
+
+def test_login_open_browser_override_forces_browser_open(tmp_path, monkeypatch) -> None:
+    provider = OAuthProviderConfig(
+        client_id="client",
+        authorize_url="https://example/auth",
+        token_url="https://example/token",
+        redirect_uri="http://localhost:1455/auth/callback",
+        scope="openid",
+        token_filename="t.json",
+    )
+    storage = FileTokenStorage(token_filename=provider.token_filename, data_dir=tmp_path, import_codex_cli=False)
+    opened: list[str] = []
+
+    def start_server(state, on_code=None):
+        on_code("callback-code")
+        return _FakeServer(), None
+
+    def exchange(code, verifier, provider, proxy=None):
+        async def run():
+            return OAuthToken(access=code, refresh="refresh", expires=123)
+
+        return run
+
+    monkeypatch.setattr("oauth_cli_kit.flow._generate_pkce", lambda: ("verifier", "challenge"))
+    monkeypatch.setattr("oauth_cli_kit.flow._create_state", lambda: "state")
+    monkeypatch.setattr("oauth_cli_kit.flow._start_local_server", start_server)
+    monkeypatch.setattr("oauth_cli_kit.flow._exchange_code_for_token_async", exchange)
+    monkeypatch.setattr("oauth_cli_kit.flow.sys.platform", "linux")
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    monkeypatch.setattr("oauth_cli_kit.flow.webbrowser.open", lambda url: opened.append(url))
+
+    login_oauth_interactive(
+        print_fn=lambda msg: None,
+        prompt_fn=lambda prompt: (_ for _ in ()).throw(AssertionError("manual prompt should not run")),
+        provider=provider,
+        storage=storage,
+        open_browser=True,
+    )
+
+    assert len(opened) == 1

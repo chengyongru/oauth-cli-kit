@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import sys
 import threading
 import time
 import urllib.parse
@@ -26,6 +28,12 @@ from oauth_cli_kit.storage import FileTokenStorage, TokenStorage, _FileLock
 
 def _httpx_client_kwargs(proxy: str | None) -> dict[str, object]:
     return {"timeout": 30.0, "proxy": proxy, "trust_env": False} if proxy else {"timeout": 30.0}
+
+
+def _should_open_browser() -> bool:
+    if sys.platform.startswith("linux"):
+        return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+    return True
 
 
 def _exchange_code_for_token_async(
@@ -135,6 +143,7 @@ def login_oauth_interactive(
     originator: str | None = None,
     storage: TokenStorage | None = None,
     proxy: str | None = None,
+    open_browser: bool | None = None,
 ) -> OAuthToken:
     """Interactive login flow."""
 
@@ -165,12 +174,17 @@ def login_oauth_interactive(
             loop.call_soon_threadsafe(code_future.set_result, code_value)
 
         server, server_error = _start_local_server(state, on_code=_notify)
-        print_fn("[cyan]A browser window will open for login. If it doesn't, open this URL manually:[/cyan]")
+        should_open_browser = _should_open_browser() if open_browser is None else open_browser
+        if should_open_browser:
+            print_fn("[cyan]A browser window will open for login. If it doesn't, open this URL manually:[/cyan]")
+        else:
+            print_fn("[yellow]No graphical browser detected. Open this URL in a browser:[/yellow]")
         print_fn(url)
-        try:
-            webbrowser.open(url)
-        except Exception:
-            pass
+        if should_open_browser:
+            try:
+                webbrowser.open(url)
+            except Exception:
+                pass
 
         if not server and server_error:
             print_fn(
