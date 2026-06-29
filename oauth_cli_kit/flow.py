@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import sys
 import threading
 import time
 import urllib.parse
@@ -123,37 +122,6 @@ def get_token(
             raise
 
 
-async def _read_stdin_line() -> str:
-    loop = asyncio.get_running_loop()
-    if hasattr(loop, "add_reader") and sys.stdin:
-        future: asyncio.Future[str] = loop.create_future()
-
-        def _on_readable() -> None:
-            line = sys.stdin.readline()
-            if not future.done():
-                future.set_result(line)
-
-        try:
-            loop.add_reader(sys.stdin, _on_readable)
-        except Exception:
-            return await loop.run_in_executor(None, sys.stdin.readline)
-
-        try:
-            return await future
-        finally:
-            try:
-                loop.remove_reader(sys.stdin)
-            except Exception:
-                pass
-
-    return await loop.run_in_executor(None, sys.stdin.readline)
-
-
-async def _await_manual_input(print_fn: Callable[[str], None]) -> str:
-    print_fn("[cyan]Paste the authorization code (or full redirect URL), or wait for the browser callback:[/cyan]")
-    return await _read_stdin_line()
-
-
 def login_oauth_interactive(
     print_fn: Callable[[str], None],
     prompt_fn: Callable[[str], str],
@@ -209,33 +177,10 @@ def login_oauth_interactive(
         try:
             if server:
                 print_fn("[dim]Waiting for browser callback...[/dim]")
-
-                tasks: list[asyncio.Task[object]] = []
-                callback_task = asyncio.create_task(asyncio.wait_for(code_future, timeout=120))
-                tasks.append(callback_task)
-                manual_task = asyncio.create_task(_await_manual_input(print_fn))
-                tasks.append(manual_task)
-
-                done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-                for task in pending:
-                    task.cancel()
-
-                for task in done:
-                    try:
-                        result = task.result()
-                    except asyncio.TimeoutError:
-                        result = None
-                    if not result:
-                        continue
-                    if task is manual_task:
-                        parsed_code, parsed_state = _parse_authorization_input(result)
-                        if parsed_state and parsed_state != state:
-                            raise RuntimeError("State validation failed.")
-                        code = parsed_code
-                    else:
-                        code = result
-                    if code:
-                        break
+                try:
+                    code = await asyncio.wait_for(code_future, timeout=120)
+                except asyncio.TimeoutError:
+                    pass
 
             if not code:
                 prompt = "Please paste the callback URL or authorization code:"
