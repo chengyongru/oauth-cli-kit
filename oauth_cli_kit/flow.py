@@ -24,10 +24,15 @@ from oauth_cli_kit.server import _start_local_server
 from oauth_cli_kit.storage import FileTokenStorage, TokenStorage, _FileLock
 
 
+def _httpx_client_kwargs(proxy: str | None) -> dict[str, object]:
+    return {"timeout": 30.0, "proxy": proxy, "trust_env": False} if proxy else {"timeout": 30.0}
+
+
 def _exchange_code_for_token_async(
     code: str,
     verifier: str,
     provider: OAuthProviderConfig,
+    proxy: str | None = None,
 ) -> Callable[[], OAuthToken]:
     async def _run() -> OAuthToken:
         data = {
@@ -37,7 +42,7 @@ def _exchange_code_for_token_async(
             "code_verifier": verifier,
             "redirect_uri": provider.redirect_uri,
         }
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(**_httpx_client_kwargs(proxy)) as client:
             response = await client.post(
                 provider.token_url,
                 data=data,
@@ -60,13 +65,13 @@ def _exchange_code_for_token_async(
     return _run
 
 
-def _refresh_token(refresh_token: str, provider: OAuthProviderConfig) -> OAuthToken:
+def _refresh_token(refresh_token: str, provider: OAuthProviderConfig, proxy: str | None = None) -> OAuthToken:
     data = {
         "grant_type": "refresh_token",
         "refresh_token": refresh_token,
         "client_id": provider.client_id,
     }
-    with httpx.Client(timeout=30.0) as client:
+    with httpx.Client(**_httpx_client_kwargs(proxy)) as client:
         response = client.post(
             provider.token_url,
             data=data,
@@ -91,6 +96,7 @@ def get_token(
     provider: OAuthProviderConfig = OPENAI_CODEX_PROVIDER,
     storage: TokenStorage | None = None,
     min_ttl_seconds: int = 60,
+    proxy: str | None = None,
 ) -> OAuthToken:
     """Get an available token (refresh if needed)."""
     storage = storage or FileTokenStorage(token_filename=provider.token_filename)
@@ -111,7 +117,7 @@ def get_token(
         if token.expires - now_ms > min_ttl_seconds * 1000:
             return token
         try:
-            refreshed = _refresh_token(token.refresh, provider)
+            refreshed = _refresh_token(token.refresh, provider, proxy)
             storage.save(refreshed)
             return refreshed
         except Exception:
@@ -128,6 +134,7 @@ def login_oauth_interactive(
     provider: OAuthProviderConfig = OPENAI_CODEX_PROVIDER,
     originator: str | None = None,
     storage: TokenStorage | None = None,
+    proxy: str | None = None,
 ) -> OAuthToken:
     """Interactive login flow."""
 
@@ -194,7 +201,7 @@ def login_oauth_interactive(
                 raise RuntimeError("Authorization code not found.")
 
             print_fn("[dim]Exchanging authorization code for tokens...[/dim]")
-            token = await _exchange_code_for_token_async(code, verifier, provider)()
+            token = await _exchange_code_for_token_async(code, verifier, provider, proxy)()
             (storage or FileTokenStorage(token_filename=provider.token_filename)).save(token)
             return token
         finally:

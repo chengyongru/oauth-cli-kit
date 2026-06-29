@@ -24,14 +24,16 @@ def test_login_browser_callback_does_not_prompt_for_manual_input(tmp_path, monke
     )
     storage = FileTokenStorage(token_filename=provider.token_filename, data_dir=tmp_path, import_codex_cli=False)
     exchanged: list[str] = []
+    proxies: list[str | None] = []
 
     def start_server(state, on_code=None):
         on_code("callback-code")
         return _FakeServer(), None
 
-    def exchange(code, verifier, provider):
+    def exchange(code, verifier, provider, proxy=None):
         async def run():
             exchanged.append(code)
+            proxies.append(proxy)
             return OAuthToken(access="access", refresh="refresh", expires=123)
 
         return run
@@ -47,8 +49,10 @@ def test_login_browser_callback_does_not_prompt_for_manual_input(tmp_path, monke
         prompt_fn=lambda prompt: (_ for _ in ()).throw(AssertionError("manual prompt should not run")),
         provider=provider,
         storage=storage,
+        proxy="http://proxy.local:8080",
     )
 
     assert token.access == "access"
     assert exchanged == ["callback-code"]
+    assert proxies == ["http://proxy.local:8080"]
     assert storage.load().refresh == "refresh"
