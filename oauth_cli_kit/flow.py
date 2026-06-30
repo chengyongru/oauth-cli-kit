@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 import threading
 import time
@@ -25,10 +26,21 @@ from oauth_cli_kit.server import _start_local_server
 from oauth_cli_kit.storage import FileTokenStorage, TokenStorage, _FileLock
 
 
+def _httpx_client_kwargs(proxy: str | None) -> dict[str, object]:
+    return {"timeout": 30.0, "proxy": proxy, "trust_env": False} if proxy else {"timeout": 30.0}
+
+
+def _should_open_browser() -> bool:
+    if sys.platform.startswith("linux"):
+        return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+    return True
+
+
 def _exchange_code_for_token_async(
     code: str,
     verifier: str,
     provider: OAuthProviderConfig,
+    proxy: str | None = None,
 ) -> Callable[[], OAuthToken]:
     async def _run() -> OAuthToken:
         data = {
@@ -38,7 +50,7 @@ def _exchange_code_for_token_async(
             "code_verifier": verifier,
             "redirect_uri": provider.redirect_uri,
         }
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(**_httpx_client_kwargs(proxy)) as client:
             response = await client.post(
                 provider.token_url,
                 data=data,
@@ -61,13 +73,13 @@ def _exchange_code_for_token_async(
     return _run
 
 
-def _refresh_token(refresh_token: str, provider: OAuthProviderConfig) -> OAuthToken:
+def _refresh_token(refresh_token: str, provider: OAuthProviderConfig, proxy: str | None = None) -> OAuthToken:
     data = {
         "grant_type": "refresh_token",
         "refresh_token": refresh_token,
         "client_id": provider.client_id,
     }
-    with httpx.Client(timeout=30.0) as client:
+    with httpx.Client(**_httpx_client_kwargs(proxy)) as client:
         response = client.post(
             provider.token_url,
             data=data,
@@ -92,6 +104,7 @@ def get_token(
     provider: OAuthProviderConfig = OPENAI_CODEX_PROVIDER,
     storage: TokenStorage | None = None,
     min_ttl_seconds: int = 60,
+    proxy: str | None = None,
 ) -> OAuthToken:
     """Get an available token (refresh if needed)."""
     storage = storage or FileTokenStorage(token_filename=provider.token_filename)
@@ -112,7 +125,7 @@ def get_token(
         if token.expires - now_ms > min_ttl_seconds * 1000:
             return token
         try:
-            refreshed = _refresh_token(token.refresh, provider)
+            refreshed = _refresh_token(token.refresh, provider, proxy)
             storage.save(refreshed)
             return refreshed
         except Exception:
@@ -123,43 +136,14 @@ def get_token(
             raise
 
 
-async def _read_stdin_line() -> str:
-    loop = asyncio.get_running_loop()
-    if hasattr(loop, "add_reader") and sys.stdin:
-        future: asyncio.Future[str] = loop.create_future()
-
-        def _on_readable() -> None:
-            line = sys.stdin.readline()
-            if not future.done():
-                future.set_result(line)
-
-        try:
-            loop.add_reader(sys.stdin, _on_readable)
-        except Exception:
-            return await loop.run_in_executor(None, sys.stdin.readline)
-
-        try:
-            return await future
-        finally:
-            try:
-                loop.remove_reader(sys.stdin)
-            except Exception:
-                pass
-
-    return await loop.run_in_executor(None, sys.stdin.readline)
-
-
-async def _await_manual_input(print_fn: Callable[[str], None]) -> str:
-    print_fn("[cyan]Paste the authorization code (or full redirect URL), or wait for the browser callback:[/cyan]")
-    return await _read_stdin_line()
-
-
 def login_oauth_interactive(
     print_fn: Callable[[str], None],
     prompt_fn: Callable[[str], str],
     provider: OAuthProviderConfig = OPENAI_CODEX_PROVIDER,
     originator: str | None = None,
     storage: TokenStorage | None = None,
+    proxy: str | None = None,
+    open_browser: bool | None = None,
 ) -> OAuthToken:
     """Interactive login flow."""
 
@@ -190,12 +174,17 @@ def login_oauth_interactive(
             loop.call_soon_threadsafe(code_future.set_result, code_value)
 
         server, server_error = _start_local_server(state, on_code=_notify)
-        print_fn("[cyan]A browser window will open for login. If it doesn't, open this URL manually:[/cyan]")
+        should_open_browser = _should_open_browser() if open_browser is None else open_browser
+        if should_open_browser:
+            print_fn("[cyan]A browser window will open for login. If it doesn't, open this URL manually:[/cyan]")
+        else:
+            print_fn("[yellow]No graphical browser detected. Open this URL in a browser:[/yellow]")
         print_fn(url)
-        try:
-            webbrowser.open(url)
-        except Exception:
-            pass
+        if should_open_browser:
+            try:
+                webbrowser.open(url)
+            except Exception:
+                pass
 
         if not server and server_error:
             print_fn(
@@ -207,38 +196,25 @@ def login_oauth_interactive(
 
         code: str | None = None
         try:
-            if server:
+            if server and should_open_browser:
                 print_fn("[dim]Waiting for browser callback...[/dim]")
-
-                tasks: list[asyncio.Task[object]] = []
-                callback_task = asyncio.create_task(asyncio.wait_for(code_future, timeout=120))
-                tasks.append(callback_task)
-                manual_task = asyncio.create_task(_await_manual_input(print_fn))
-                tasks.append(manual_task)
-
-                done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-                for task in pending:
-                    task.cancel()
-
-                for task in done:
-                    try:
-                        result = task.result()
-                    except asyncio.TimeoutError:
-                        result = None
-                    if not result:
-                        continue
-                    if task is manual_task:
-                        parsed_code, parsed_state = _parse_authorization_input(result)
-                        if parsed_state and parsed_state != state:
-                            raise RuntimeError("State validation failed.")
-                        code = parsed_code
-                    else:
-                        code = result
-                    if code:
-                        break
+                try:
+                    code = await asyncio.wait_for(code_future, timeout=120)
+                except asyncio.TimeoutError:
+                    server.shutdown()
+                    server.server_close()
+                    server = None
+            elif server:
+                server.shutdown()
+                server.server_close()
+                server = None
 
             if not code:
-                prompt = "Please paste the callback URL or authorization code:"
+                prompt = (
+                    "Please open the URL above in a browser, then paste the full redirect URL:"
+                    if not should_open_browser
+                    else "Please paste the callback URL or authorization code:"
+                )
                 raw = await loop.run_in_executor(None, prompt_fn, prompt)
                 parsed_code, parsed_state = _parse_authorization_input(raw)
                 if parsed_state and parsed_state != state:
@@ -249,7 +225,7 @@ def login_oauth_interactive(
                 raise RuntimeError("Authorization code not found.")
 
             print_fn("[dim]Exchanging authorization code for tokens...[/dim]")
-            token = await _exchange_code_for_token_async(code, verifier, provider)()
+            token = await _exchange_code_for_token_async(code, verifier, provider, proxy)()
             (storage or FileTokenStorage(token_filename=provider.token_filename)).save(token)
             return token
         finally:
