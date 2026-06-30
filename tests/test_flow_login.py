@@ -46,6 +46,7 @@ def test_login_browser_callback_does_not_prompt_for_manual_input(tmp_path, monke
     monkeypatch.setattr("oauth_cli_kit.flow._create_state", lambda: "state")
     monkeypatch.setattr("oauth_cli_kit.flow._start_local_server", start_server)
     monkeypatch.setattr("oauth_cli_kit.flow._exchange_code_for_token_async", exchange)
+    monkeypatch.setattr("oauth_cli_kit.flow._should_open_browser", lambda: True)
     monkeypatch.setattr("oauth_cli_kit.flow.webbrowser.open", lambda url: True)
 
     token = login_oauth_interactive(
