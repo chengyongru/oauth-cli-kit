@@ -5,7 +5,7 @@ from __future__ import annotations
 import socket
 import threading
 import urllib.parse
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable
 
 from oauth_cli_kit.constants import SUCCESS_HTML
@@ -17,13 +17,24 @@ class _OAuthHandler(BaseHTTPRequestHandler):
     server_version = "OAuthCliKit/1.0"
     protocol_version = "HTTP/1.1"
 
+    def _send_body(self, status: int, body: bytes, content_type: str = "text/plain; charset=utf-8") -> None:
+        self.close_connection = True
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.wfile.write(body)
+        try:
+            self.wfile.flush()
+        except Exception:
+            pass
+
     def do_GET(self) -> None:  # noqa: N802
         try:
             url = urllib.parse.urlparse(self.path)
             if url.path != "/auth/callback":
-                self.send_response(404)
-                self.end_headers()
-                self.wfile.write(b"Not found")
+                self._send_body(404, b"Not found")
                 return
 
             qs = urllib.parse.parse_qs(url.query)
@@ -31,15 +42,11 @@ class _OAuthHandler(BaseHTTPRequestHandler):
             state = qs.get("state", [None])[0]
 
             if state != self.server.expected_state:
-                self.send_response(400)
-                self.end_headers()
-                self.wfile.write(b"State mismatch")
+                self._send_body(400, b"State mismatch")
                 return
 
             if not code:
-                self.send_response(400)
-                self.end_headers()
-                self.wfile.write(b"Missing code")
+                self._send_body(400, b"Missing code")
                 return
 
             self.server.code = code
@@ -49,29 +56,20 @@ class _OAuthHandler(BaseHTTPRequestHandler):
             except Exception:
                 pass
             body = SUCCESS_HTML.encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.send_header("Connection", "close")
-            self.end_headers()
-            self.wfile.write(body)
-            try:
-                self.wfile.flush()
-            except Exception:
-                pass
-            self.close_connection = True
+            self._send_body(200, body, "text/html; charset=utf-8")
         except Exception:
-            self.send_response(500)
-            self.end_headers()
-            self.wfile.write(b"Internal error")
+            self._send_body(500, b"Internal error")
 
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A003
         # Suppress default logs to avoid noisy output.
         return
 
 
-class _OAuthServer(HTTPServer):
+class _OAuthServer(ThreadingHTTPServer):
     """OAuth callback server with state."""
+
+    daemon_threads = True
+    block_on_close = False
 
     def __init__(
         self,
